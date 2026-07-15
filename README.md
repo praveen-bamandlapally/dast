@@ -143,6 +143,11 @@ node report.js
 
 - `--redo-failed`: Re-run failed endpoints
 - `--injectable <mask>`: `query,post,path,headers,cookie,all` (default: `query,post`)
+- `--header <name:value>`: Extra request header sent to the target on every request (repeatable)
+- `--cookie <name=value>`: Extra request cookie sent to the target on every request (repeatable)
+- `--scan-log <path>`: Log file for 401/500 error responses (default: `scanlogs.txt`)
+- `--alert-log <path>`: Log file for the request/response behind each alert (default: `calls_alerts.txt`)
+- `--alert-risk <list>`: Severities logged to the alert log: `high,medium,low,info,all` (default: `high,medium`)
 - `--db <path>`: DB file path
 - `--strategy <name>`: Strategy label saved in DB
 - `--zap-host <host>` / `--zap-port <port>`
@@ -152,6 +157,45 @@ Example:
 
 ```powershell
 node zap-openapi-policy-scan.js --spec openapi.json --base-url http://localhost:3000 --policy API --redo-failed --injectable all --zap-host 127.0.0.1 --zap-port 8090
+```
+
+## Authentication: Custom Headers & Cookies
+
+Attach an auth header or cookie to every request ZAP sends to the target (useful
+for endpoints behind a token/session). Both flags are repeatable, and cookies are
+combined into a single `Cookie` header.
+
+```powershell
+node zap-openapi-policy-scan.js --spec openapi.json --base-url http://localhost:3000 --policy API `
+  --header "Authorization: Bearer <token>" `
+  --header "X-API-Key: secret123" `
+  --cookie "session=abc123"
+```
+
+Notes:
+
+- These values are added to the seeded request for each endpoint; they do not
+  change *what* ZAP fuzzes (that is controlled by `--injectable`).
+- The sample app exposes `POST /api/secure-data`, which returns `401` unless the
+  request carries `X-API-Key: secret123` — handy for verifying header injection.
+
+## Scan Logging
+
+Two debug logs are produced during a scan (a run banner is written to each at
+startup):
+
+- **Error responses** — `scanlogs.txt` (override with `--scan-log` / `SCAN_LOG_PATH`).
+  Every `401`/`500` response observed for an endpoint (seed request and any
+  scanner-generated requests) is logged with the full request and response.
+- **Alert calls** — `calls_alerts.txt` (override with `--alert-log` / `ALERT_LOG_PATH`).
+  For each discovered alert, the exact fuzzed request/response that triggered it
+  is logged along with the attack payload, param, evidence, and CWE/plugin. Use
+  `--alert-risk` / `ALERT_LOG_RISKS` to filter by severity (default `high,medium`).
+
+```powershell
+# Log only High-severity alert calls to a custom file
+node zap-openapi-policy-scan.js --spec openapi.json --base-url http://localhost:3000 --policy API `
+  --alert-risk high --alert-log high-alerts.txt
 ```
 
 ## Environment Variable Overrides
@@ -167,6 +211,11 @@ Supported environment variables:
 - `ZAP_PORT`
 - `ZAP_API_KEY`
 - `ZAP_INJECTABLE_PARAMS`
+- `ZAP_EXTRA_HEADERS` (one `Name: Value` per line)
+- `ZAP_EXTRA_COOKIES` (`name=value; name2=value2`)
+- `SCAN_LOG_PATH`
+- `ALERT_LOG_PATH`
+- `ALERT_LOG_RISKS`
 
 Example:
 
@@ -186,6 +235,8 @@ node zap-openapi-policy-scan.js
   - Confirm endpoints exist in `openapi.json`
   - Verify requests are accepted by target app
   - Try broader injection settings (`--injectable all`)
+- Endpoint returns `401`: The target likely requires auth. Supply the header/cookie
+  via `--header` / `--cookie`; check `scanlogs.txt` for the logged 401 request/response.
 
 ## Security Notes
 
