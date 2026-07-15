@@ -1,0 +1,220 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Vulnerable API Demo",
+    "description": "Intentionally vulnerable API for security testing with ZAP. Dangerous operations (command execution, file reads) are safely simulated so scanners flag them without harming the host.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local server"
+    }
+  ],
+  "paths": {
+    "/api/user": {
+      "post": {
+        "summary": "Get user by username (A03: SQL Injection)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username"],
+                "properties": {
+                  "username": {
+                    "type": "string",
+                    "example": "admin"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "User found"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    },
+    "/api/ping": {
+      "post": {
+        "summary": "Ping a host (A03: OS Command Injection, simulated)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["host"],
+                "properties": {
+                  "host": { "type": "string", "example": "127.0.0.1" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Ping output" }
+        }
+      }
+    },
+    "/api/admin/users": {
+      "post": {
+        "summary": "List all users (A01/A07: Missing Authentication)",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": {} }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "All users returned without auth" }
+        }
+      }
+    },
+    "/api/user/id": {
+      "post": {
+        "summary": "Get user by id (A01: IDOR)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                  "id": { "type": "integer", "example": 1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "User returned without authorization check" }
+        }
+      }
+    },
+    "/api/search": {
+      "post": {
+        "summary": "Search (A03: Reflected Cross-Site Scripting)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["q"],
+                "properties": {
+                  "q": { "type": "string", "example": "test" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "HTML page reflecting the search term" }
+        }
+      }
+    },
+    "/api/login": {
+      "post": {
+        "summary": "Login (A02/A07: Sensitive Data Exposure)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "password"],
+                "properties": {
+                  "username": { "type": "string", "example": "admin" },
+                  "password": { "type": "string", "example": "admin123" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Login result (may expose credentials)" }
+        }
+      }
+    },
+    "/api/reset-password": {
+      "post": {
+        "summary": "Reset password (A04/A07: No Rate Limiting, user enumeration)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email"],
+                "properties": {
+                  "email": { "type": "string", "example": "admin@example.com" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Reset result" }
+        }
+      }
+    },
+    "/api/register": {
+      "post": {
+        "summary": "Register (A07: Weak Password Policy)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["username", "password", "email"],
+                "properties": {
+                  "username": { "type": "string", "example": "newuser" },
+                  "password": { "type": "string", "example": "123" },
+                  "email": { "type": "string", "example": "newuser@example.com" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Registration result" }
+        }
+      }
+    },
+    "/api/file": {
+      "post": {
+        "summary": "Read a file (A01: Path Traversal, simulated)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "example": "readme.txt" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "File contents" },
+          "404": { "description": "File not found" }
+        }
+      }
+    }
+  }
+}
