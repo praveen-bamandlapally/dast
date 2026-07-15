@@ -25,6 +25,11 @@ const defaults = {
   apiKey: '',
   pollIntervalMs: 1000,
   redoFailed: false,
+  scanLogPath: 'scanlogs.txt',
+  alertLogPath: 'calls_alerts.txt',
+  alertLogRisks: ['high', 'medium'],
+  extraHeaders: {},
+  cookies: {},
   activeScanTuning: {
     threadPerHost: 5,
     delayInMs: 0,
@@ -46,6 +51,11 @@ function printUsage() {
     '  --db <path>            SQLite DB path (default: dast.db)',
     '  --strategy <name>      Test strategy name (default: zap)',
     '  --redo-failed          Re-run endpoints that previously failed',
+    '  --header <name:value>  Extra request header sent to the target (repeatable)',
+    '  --cookie <name=value>  Extra request cookie sent to the target (repeatable)',
+    '  --scan-log <path>      Log file for 401/500 error responses (default: scanlogs.txt)',
+    '  --alert-log <path>     Log file for request/response of each alert (default: calls_alerts.txt)',
+    '  --alert-risk <list>    Severities to log to alert log: high,medium,low,info,all (default: high,medium)',
     '  --injectable <mask>    Injection points: query,post,path,headers,cookie,all (default: query,post)',
     '  --zap-host <host>      ZAP host (default: 127.0.0.1)',
     '  --zap-port <port>      ZAP API port',
@@ -53,7 +63,8 @@ function printUsage() {
     '  --help                 Show this help text',
     '',
     'Environment overrides:',
-    '  OPENAPI_SPEC_PATH, BASE_URL, ZAP_SCAN_POLICY, DAST_DB_PATH, TEST_STRATEGY, ZAP_HOST, ZAP_PORT, ZAP_API_KEY, ZAP_INJECTABLE_PARAMS'
+    '  OPENAPI_SPEC_PATH, BASE_URL, ZAP_SCAN_POLICY, DAST_DB_PATH, TEST_STRATEGY, ZAP_HOST, ZAP_PORT, ZAP_API_KEY, ZAP_INJECTABLE_PARAMS,',
+    '  ZAP_EXTRA_HEADERS (one "Name: Value" per line), ZAP_EXTRA_COOKIES ("name=value; name2=value2"), SCAN_LOG_PATH, ALERT_LOG_PATH, ALERT_LOG_RISKS'
   ].join('\n'));
 }
 
@@ -116,6 +127,116 @@ function parseInjectableMask(rawValue) {
   return mask;
 }
 
+// Parses the alert-log severity filter into a Set of normalized risk labels
+// ('high' | 'medium' | 'low' | 'info'). Accepts a comma/space list or 'all'.
+function parseRiskFilter(rawValue) {
+  const value = String(rawValue || '').trim().toLowerCase();
+  if (!value) {
+    return new Set(defaults.alertLogRisks);
+  }
+
+  if (value === 'all') {
+    return new Set(['high', 'medium', 'low', 'info']);
+  }
+
+  const map = {
+    high: 'high',
+    medium: 'medium',
+    med: 'medium',
+    low: 'low',
+    info: 'info',
+    informational: 'info'
+  };
+
+  const result = new Set();
+  for (const token of value.split(/[,\s|]+/).filter(Boolean)) {
+    const risk = map[token];
+    if (!risk) {
+      throw new Error(`Invalid alert risk filter token: ${token}`);
+    }
+    result.add(risk);
+  }
+
+  if (!result.size) {
+    throw new Error(`Invalid alert risk filter: ${rawValue}`);
+  }
+  return result;
+}
+
+// Adds a single "Name: Value" header entry to the target map.
+function addHeaderEntry(target, rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) {
+    return;
+  }
+  const separator = value.indexOf(':');
+  if (separator === -1) {
+    throw new Error(`Invalid header (expected "Name: Value"): ${rawValue}`);
+  }
+  const name = value.slice(0, separator).trim();
+  if (!name) {
+    throw new Error(`Invalid header name in: ${rawValue}`);
+  }
+  target[name] = value.slice(separator + 1).trim();
+}
+
+// Adds a single "name=value" cookie entry to the target map.
+function addCookieEntry(target, rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) {
+    return;
+  }
+  const separator = value.indexOf('=');
+  if (separator === -1) {
+    throw new Error(`Invalid cookie (expected "name=value"): ${rawValue}`);
+  }
+  const name = value.slice(0, separator).trim();
+  if (!name) {
+    throw new Error(`Invalid cookie name in: ${rawValue}`);
+  }
+  target[name] = value.slice(separator + 1).trim();
+}
+
+// Parses ZAP_EXTRA_HEADERS (one "Name: Value" per line) into a header map.
+function parseHeadersEnv(rawValue) {
+  const target = {};
+  for (const line of String(rawValue || '').split(/\r?\n/)) {
+    if (line.trim()) {
+      addHeaderEntry(target, line);
+    }
+  }
+  return target;
+}
+
+// Parses ZAP_EXTRA_COOKIES ("name=value; name2=value2") into a cookie map.
+function parseCookiesEnv(rawValue) {
+  const target = {};
+  for (const part of String(rawValue || '').split(';')) {
+    if (part.trim()) {
+      addCookieEntry(target, part);
+    }
+  }
+  return target;
+}
+
+// Serializes the cookie map into a single "Cookie" header value.
+function buildCookieHeader(cookies) {
+  return Object.entries(cookies || {})
+    .map(([name, value]) => `${name}=${value}`)
+    .join('; ');
+}
+
+// Combines configured headers and cookies into the extra headers appended to
+// every request seeded into ZAP for the target.
+function buildExtraHeaders() {
+  const headers = { ...config.extraHeaders };
+  const cookie = buildCookieHeader(config.cookies);
+  if (cookie) {
+    headers.Cookie = headers.Cookie ? `${headers.Cookie}; ${cookie}` : cookie;
+  }
+  return headers;
+}
+
 function parseArgs(argv) {
   const cli = {
     specPath: String(process.env.OPENAPI_SPEC_PATH || defaults.specPath).trim(),
@@ -128,6 +249,11 @@ function parseArgs(argv) {
     apiKey: process.env.ZAP_API_KEY || defaults.apiKey,
     pollIntervalMs: defaults.pollIntervalMs,
     redoFailed: defaults.redoFailed,
+    scanLogPath: String(process.env.SCAN_LOG_PATH || defaults.scanLogPath).trim() || defaults.scanLogPath,
+    alertLogPath: String(process.env.ALERT_LOG_PATH || defaults.alertLogPath).trim() || defaults.alertLogPath,
+    alertLogRisks: parseRiskFilter(process.env.ALERT_LOG_RISKS || ''),
+    extraHeaders: parseHeadersEnv(process.env.ZAP_EXTRA_HEADERS || ''),
+    cookies: parseCookiesEnv(process.env.ZAP_EXTRA_COOKIES || ''),
     activeScanTuning: {
       ...defaults.activeScanTuning,
       injectableParams: parseInjectableMask(process.env.ZAP_INJECTABLE_PARAMS || '')
@@ -143,6 +269,51 @@ function parseArgs(argv) {
     }
     if (arg === '--redo-failed') {
       cli.redoFailed = true;
+      continue;
+    }
+    if (arg === '--header') {
+      const value = String(argv[index + 1] || '').trim();
+      if (!value) {
+        throw new Error('Missing value for --header');
+      }
+      addHeaderEntry(cli.extraHeaders, value);
+      index += 1;
+      continue;
+    }
+    if (arg === '--cookie') {
+      const value = String(argv[index + 1] || '').trim();
+      if (!value) {
+        throw new Error('Missing value for --cookie');
+      }
+      addCookieEntry(cli.cookies, value);
+      index += 1;
+      continue;
+    }
+    if (arg === '--scan-log') {
+      const value = String(argv[index + 1] || '').trim();
+      if (!value) {
+        throw new Error('Missing value for --scan-log');
+      }
+      cli.scanLogPath = value;
+      index += 1;
+      continue;
+    }
+    if (arg === '--alert-log') {
+      const value = String(argv[index + 1] || '').trim();
+      if (!value) {
+        throw new Error('Missing value for --alert-log');
+      }
+      cli.alertLogPath = value;
+      index += 1;
+      continue;
+    }
+    if (arg === '--alert-risk') {
+      const value = String(argv[index + 1] || '').trim();
+      if (!value) {
+        throw new Error('Missing value for --alert-risk');
+      }
+      cli.alertLogRisks = parseRiskFilter(value);
+      index += 1;
       continue;
     }
     if (arg === '--injectable') {
@@ -222,6 +393,8 @@ function parseArgs(argv) {
   cli.specPath = absPath;
   cli.baseUrl = stripTrailingSlash(assertValidUrl(cli.baseUrl, 'base URL'));
   cli.dbPath = resolvePath(cli.dbPath);
+  cli.scanLogPath = resolvePath(cli.scanLogPath);
+  cli.alertLogPath = resolvePath(cli.alertLogPath);
 
   return cli;
 }
@@ -321,16 +494,19 @@ function isUrlNotFoundError(error) {
 // API, used as the seeding fallback for non-HTTP(S)-proxyable targets.
 function buildRawHttpRequest(operation) {
   const target = new URL(operation.requestUrl);
-  const lines = [
-    `${operation.httpMethod} ${operation.requestPath} HTTP/1.1`,
-    `Host: ${target.host}`,
-    'Accept: application/json'
-  ];
+  const headers = { Host: target.host, Accept: 'application/json' };
 
   const body = operation.bodyString || '';
   if (body) {
-    lines.push(`Content-Type: ${operation.contentType || 'application/json'}`);
-    lines.push(`Content-Length: ${Buffer.byteLength(body)}`);
+    headers['Content-Type'] = operation.contentType || 'application/json';
+    headers['Content-Length'] = Buffer.byteLength(body);
+  }
+
+  Object.assign(headers, buildExtraHeaders());
+
+  const lines = [`${operation.httpMethod} ${operation.requestPath} HTTP/1.1`];
+  for (const [name, value] of Object.entries(headers)) {
+    lines.push(`${name}: ${value}`);
   }
 
   return `${lines.join('\r\n')}\r\n\r\n${body}`;
@@ -347,6 +523,8 @@ function proxyRequestThroughZap(operation, target) {
       headers['Content-Type'] = operation.contentType || 'application/json';
       headers['Content-Length'] = Buffer.byteLength(body);
     }
+
+    Object.assign(headers, buildExtraHeaders());
 
     const request = http.request(
       {
@@ -399,6 +577,14 @@ async function seedScanTree(operations) {
     }
   }
   console.log(`Seeded ${operations.length} request(s) into ZAP from the OpenAPI spec (method + body per endpoint).`);
+  const headerNames = Object.keys(config.extraHeaders || {});
+  const cookieNames = Object.keys(config.cookies || {});
+  if (headerNames.length || cookieNames.length) {
+    console.log(
+      `Applied extra request headers: [${headerNames.join(', ') || 'none'}], ` +
+      `cookies: [${cookieNames.join(', ') || 'none'}].`
+    );
+  }
 }
 
 async function applyActiveScanTuning() {
@@ -499,14 +685,14 @@ async function runActiveScan(operation, scanPolicyName) {
     await sleep(config.pollIntervalMs);
     const status = await zapJson('ascan', 'view', 'status', { scanId });
     if (String(status.status) === '100') {
-      return;
+      return scanId;
     }
   }
 }
 
 async function runActiveScanWithRecovery(operation, scanPolicyName) {
   try {
-    await runActiveScan(operation, scanPolicyName);
+    return await runActiveScan(operation, scanPolicyName);
   } catch (error) {
     if (!isUrlNotFoundError(error)) {
       throw error;
@@ -517,8 +703,169 @@ async function runActiveScanWithRecovery(operation, scanPolicyName) {
     console.warn(`ZAP reported url_not_found for ${operation.httpMethod} ${operation.requestUrl}. Re-seeding request and retrying once.`);
     await seedRequestInZap(operation);
     await sleep(500);
-    await runActiveScan(operation, scanPolicyName);
+    return runActiveScan(operation, scanPolicyName);
   }
+}
+
+// Error status codes captured to the scan log for debugging.
+const LOGGED_ERROR_STATUS_CODES = new Set([401, 500]);
+
+// Message ids already written to the scan log during this process, so the same
+// history entry is not logged twice across per-operation passes.
+const loggedMessageIds = new Set();
+
+// History message id that existed before this run started; older messages
+// (e.g. from a previous scan sharing the same ZAP session) are skipped so the
+// log only reflects the current run.
+let scanLogBaselineId = 0;
+
+async function captureScanLogBaseline() {
+  try {
+    const response = await zapJson('core', 'view', 'numberOfMessages');
+    scanLogBaselineId = Number(response?.numberOfMessages) || 0;
+  } catch {
+    scanLogBaselineId = 0;
+  }
+}
+
+// Extracts the numeric HTTP status code from a ZAP response header block.
+function parseResponseStatusCode(responseHeader) {
+  const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})/i.exec(String(responseHeader || '').trim());
+  return match ? Number(match[1]) : null;
+}
+
+// Appends a full request/response transcript for one error message to the log.
+function appendScanLogEntry(operation, messageId, status, message) {
+  const divider = '='.repeat(80);
+  const entry = [
+    divider,
+    `[${new Date().toISOString()}] HTTP ${status} during scan of ${operation.httpMethod} ${operation.scanUrl}`,
+    `ZAP history message id: ${messageId}`,
+    '',
+    '--- REQUEST ---',
+    String(message?.requestHeader || '').trimEnd(),
+    String(message?.requestBody || ''),
+    '',
+    '--- RESPONSE ---',
+    String(message?.responseHeader || '').trimEnd(),
+    String(message?.responseBody || ''),
+    '',
+    ''
+  ].join('\n');
+
+  fs.appendFileSync(config.scanLogPath, entry, 'utf8');
+}
+
+// Inspects every ZAP history message for the operation's URL (both the seed
+// request and any scanner-generated requests) and logs the 401/500 responses
+// (request + response) to the scan log file for debugging.
+async function logErrorResponsesForOperation(operation) {
+  let messages;
+  try {
+    const response = await zapJson('core', 'view', 'messages', { baseurl: operation.scanUrl });
+    messages = Array.isArray(response?.messages) ? response.messages : [];
+  } catch (error) {
+    console.warn(`Could not read ZAP history for ${operation.httpMethod} ${operation.scanUrl}: ${String(error?.message || error)}`);
+    return 0;
+  }
+
+  let logged = 0;
+  for (const message of messages) {
+    const id = Number(message?.id);
+    if (Number.isFinite(id)) {
+      if (id < scanLogBaselineId || loggedMessageIds.has(id)) {
+        continue;
+      }
+    }
+
+    const status = parseResponseStatusCode(message?.responseHeader);
+    if (!LOGGED_ERROR_STATUS_CODES.has(status)) {
+      continue;
+    }
+
+    try {
+      appendScanLogEntry(operation, message?.id ?? 'unknown', status, message);
+      if (Number.isFinite(id)) {
+        loggedMessageIds.add(id);
+      }
+      logged += 1;
+    } catch (error) {
+      console.warn(`Could not write scan log entry to ${config.scanLogPath}: ${String(error?.message || error)}`);
+    }
+  }
+
+  if (logged) {
+    console.warn(`Logged ${logged} error response(s) (401/500) for ${operation.httpMethod} ${operation.scanUrl} to ${config.scanLogPath}`);
+  }
+  return logged;
+}
+
+// Appends the fuzzed request/response and metadata for a single alert to the
+// alert log, so it is clear which attack request triggered each finding.
+function appendAlertLogEntry(operation, alert, message) {
+  const divider = '#'.repeat(80);
+  const entry = [
+    divider,
+    `[${new Date().toISOString()}] ${alert?.risk || '?'} - ${alert?.alert || alert?.name || 'Alert'}`,
+    `Endpoint:   ${operation.httpMethod} ${operation.scanUrl}`,
+    `Alert URL:  ${alert?.url || ''}`,
+    `Param:      ${alert?.param || ''}`,
+    `Attack:     ${alert?.attack || ''}`,
+    `Evidence:   ${alert?.evidence || ''}`,
+    `CWE=${alert?.cweid ?? ''} plugin=${alert?.pluginId ?? ''} confidence=${alert?.confidence || ''}`,
+    `ZAP message id: ${alert?.messageId ?? 'unknown'}`,
+    '',
+    '--- REQUEST ---',
+    message ? String(message?.requestHeader || '').trimEnd() : '(request unavailable — see Attack/Param above)',
+    message ? String(message?.requestBody || '') : '',
+    '',
+    '--- RESPONSE ---',
+    message ? String(message?.responseHeader || '').trimEnd() : '(response unavailable)',
+    message ? String(message?.responseBody || '') : '',
+    '',
+    ''
+  ].join('\n');
+
+  fs.appendFileSync(config.alertLogPath, entry, 'utf8');
+}
+
+// For every alert found on an endpoint, resolves the history message that
+// triggered it (alert.messageId) and logs the exact fuzzed request/response.
+async function logAlertCalls(alerts, operation) {
+  if (!Array.isArray(alerts) || !alerts.length) {
+    return 0;
+  }
+
+  let logged = 0;
+  for (const alert of alerts) {
+    if (!config.alertLogRisks.has(normalizeRisk(alert))) {
+      continue;
+    }
+
+    const messageId = alert?.messageId;
+    let message = null;
+
+    if (messageId !== undefined && messageId !== null && String(messageId).trim() !== '') {
+      try {
+        const response = await zapJson('core', 'view', 'message', { id: messageId });
+        message = response?.message || response;
+      } catch {
+        message = null;
+      }
+    }
+
+    try {
+      appendAlertLogEntry(operation, alert, message);
+      logged += 1;
+    } catch (error) {
+      console.warn(`Could not write alert log entry to ${config.alertLogPath}: ${String(error?.message || error)}`);
+    }
+  }
+
+  if (logged) {
+    console.warn(`Logged ${logged} alert call(s) for ${operation.httpMethod} ${operation.scanUrl} to ${config.alertLogPath}`);
+  }
+  return logged;
 }
 
 async function fetchAlertsForUrl(url) {
@@ -911,6 +1258,23 @@ async function main() {
 
   await seedScanTree(operations);
 
+  try {
+    fs.appendFileSync(
+      config.scanLogPath,
+      `\n##### Scan run started ${new Date().toISOString()} — baseUrl=${config.baseUrl} policy=${config.scanPolicyName} #####\n`,
+      'utf8'
+    );
+    fs.appendFileSync(
+      config.alertLogPath,
+      `\n##### Scan run started ${new Date().toISOString()} — baseUrl=${config.baseUrl} policy=${config.scanPolicyName} #####\n`,
+      'utf8'
+    );
+  } catch (error) {
+    console.warn(`Could not write to scan log ${config.scanLogPath}: ${String(error?.message || error)}`);
+  }
+
+  await captureScanLogBaseline();
+
   const db = openDatabase(config.dbPath);
   const counters = {
     total: operations.length,
@@ -940,7 +1304,9 @@ async function main() {
 
       try {
         await runActiveScanWithRecovery(operation, config.scanPolicyName);
+        await logErrorResponsesForOperation(operation);
         const alerts = await fetchAlertsForUrl(operation.scanUrl);
+        await logAlertCalls(alerts, operation);
         const summary = summarizeAlerts(alerts);
         await upsertResult(db, operation, 'COMPLETE', {
           ...summary,
