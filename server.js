@@ -202,6 +202,26 @@ app.post('/api/file', (req, res) => {
   res.status(404).json({ error: 'File not found' });
 });
 
+// NEW: Header-protected endpoint to exercise the scanner's --header injection
+// and 401 error-response logging. Requires the X-API-Key request header:
+// missing/invalid key -> 401 (logged by the scanner); valid key -> 200 data.
+app.post('/api/secure-data', (req, res) => {
+  const apiKey = req.get('X-API-Key');
+
+  if (apiKey !== 'secret123') {
+    res.status(401).json({ error: 'Unauthorized: missing or invalid X-API-Key header' });
+    return;
+  }
+
+  db.all('SELECT id, username, email, role FROM users', [], (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
+    res.json({ data: rows });
+  });
+});
+
 // Root endpoint - Serve HTML page
 app.get('/', (req, res) => {
   const fs = require('fs');
@@ -221,7 +241,8 @@ app.get('/', (req, res) => {
           'POST /api/login (Sensitive Data Exposure)',
           'POST /api/reset-password (No Rate Limiting)',
           'POST /api/register (Weak Password Policy)',
-          'POST /api/file (Directory Traversal)'
+          'POST /api/file (Directory Traversal)',
+          'POST /api/secure-data (Requires X-API-Key header; 401 without it)'
         ],
         openapi: 'OpenAPI spec available at /openapi.json'
       });
