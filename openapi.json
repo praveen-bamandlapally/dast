@@ -215,6 +215,31 @@
           "404": { "description": "File not found" }
         }
       }
+    },
+    "/api/secure-data": {
+      "post": {
+        "summary": "Get protected data (requires X-API-Key header; 401 without it)",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "example": "secret123" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "properties": {} }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Protected data returned" },
+          "401": { "description": "Missing or invalid X-API-Key header" }
+        }
+      }
     }
   }
 }
