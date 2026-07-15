@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "setup:db": "node setup-zap-db.js",
+    "scan:api": "node zap-openapi-policy-scan.js --spec openapi.json --base-url http://localhost:3000 --policy API",
+    "scan:api:owasp": "node zap-openapi-owasp-scan.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "sqlite3": "^6.0.1",
+    "yaml": "^2.8.1"
+  }
+}
